@@ -19,8 +19,8 @@ defmodule Web.Components.SensorChart do
     ~H"""
     <div class="sensor-chart">
       <p :if={@data == []} style="color: #666;">No data available for this time range</p>
-      <div :if={@data != []} class="chart-container">
-        <svg width={@chart.width} height={@chart.height} style="border: 1px solid #ccc; background: white;">
+      <div :if={@data != []} class="chart-container" style="width: 100%;">
+        <svg viewBox={"0 0 #{@chart.width} #{@chart.height}"} preserveAspectRatio="xMidYMid meet" style="width: 100%; height: auto; border: 1px solid #ccc; background: white;">
           <!-- Y-axis -->
           <line
             x1={@chart.margin_left}
