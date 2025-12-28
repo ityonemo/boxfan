@@ -255,7 +255,7 @@ A Nerves-based embedded system for controlling a box fan via relay board, with V
   - Relay 1 (CH1): Fan speed level 1 - GPIO 26 (BCM), Pin 37
   - Relay 2 (CH2): Fan speed level 2 - GPIO 20 (BCM), Pin 38
   - Relay 3 (CH3): Fan speed level 3 - GPIO 21 (BCM), Pin 40
-  - **Control Logic**: Active LOW (relay activates when GPIO outputs LOW)
+  - **Control Logic**: Active HIGH (relay activates when GPIO outputs HIGH)
   - **Constraint**: Only one relay should be active at a time
   - **Important**: Relay_JMP jumper must be connected for Pi control
 - **Sensor**: Adafruit BME680 - Temperature, Humidity, Pressure & Gas Sensor
@@ -351,6 +351,7 @@ CREATE TABLE events (
   inserted_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL
 );
+CREATE INDEX events_inserted_at_idx ON events(inserted_at);
 
 -- sensor_readings table (BME680 data)
 CREATE TABLE sensor_readings (
@@ -362,8 +363,6 @@ CREATE TABLE sensor_readings (
   inserted_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL
 );
-
--- Index for efficient time-range queries
 CREATE INDEX sensor_readings_inserted_at_idx ON sensor_readings(inserted_at);
 ```
 
@@ -389,12 +388,12 @@ CREATE INDEX sensor_readings_inserted_at_idx ON sensor_readings(inserted_at);
 
 ┌─────────────────────────────────────────┐
 │   Boxfan.Scheduler GenServer            │
-│  → Every 60 min: set_speed(1)           │
-│  → After 5 min: set_speed(0)            │
+│  → Every 60 min: set_relay(1)           │
+│  → After 5 min: set_relay(0)            │
 └─────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────┐
-│    Boxfan.BME680Sensor GenServer        │
+│      Boxfan.AirSensor GenServer         │
 │  → Sample every 60s: Temp, Humidity,    │
 │     Pressure, Gas resistance            │
 │  → Store in SQLite sensor_readings      │
@@ -407,74 +406,23 @@ CREATE INDEX sensor_readings_inserted_at_idx ON sensor_readings(inserted_at);
 └─────────────────────────────────────────┘
 ```
 
-## Implementation Plan
-
-### Phase 1: Core Infrastructure
-1. Add Phoenix dependencies to mix.exs
-2. Set up Phoenix endpoint and router
-3. Configure Ecto with SQLite adapter
-4. Create events and sensor_readings table migrations
-5. Set up basic Phoenix LiveView
-
-### Phase 2: Relay Control
-1. Configure GPIO pins for 3 relays
-2. Implement `Boxfan.FanController` GenServer
-   - State management for current relay
-   - Mutual exclusion logic
-   - Active LOW GPIO control
-   - Event logging to SQLite
-3. Create relay control API functions
-
-### Phase 3: BME680 Sensor Integration
-1. Configure I2C for BME680 (address 0x77)
-2. Create `Boxfan.BME680Sensor` GenServer
-   - Read temperature, humidity, pressure, gas resistance
-   - Sample every 60 seconds using Process.send_after
-   - Store readings in sensor_readings table
-   - Implement data retention (purge records > 30 days old)
-3. Create sensor data query functions
-
-### Phase 4: Web Dashboard
-1. Create dashboard LiveView
-2. Display current sensor readings (real-time)
-3. Display relay events from database
-4. Add manual control buttons (Off, Speed 1, Speed 2, Speed 3)
-5. Implement time-range selector (Hour/Day/Week/Month)
-6. Create charts for historical sensor data:
-   - Temperature chart
-   - Humidity chart
-   - Pressure chart
-   - Gas resistance chart
-7. Wire buttons to FanController
-8. Subscribe to sensor updates via PubSub
-
-### Phase 5: Scheduling
-1. Implement `Boxfan.Scheduler` GenServer
-2. Use Process.send_after for periodic ventilation:
-   - Turn on fan at speed 1 every 60 minutes
-   - Schedule turn-off after 5 minutes
-3. Ensure events are logged with source='automatic'
-
-### Phase 6: Tailscale Integration
-1. Configure Tailscale via nerves_pack
-2. Update rootfs_overlay for Tailscale auth
-3. Test remote access over Tailscale network
-
 ## Configuration
 
 ### GPIO Pin Mapping
 ```elixir
 # Electronics-Salon RPi Power Relay Board
-# Active LOW logic - relays activate when GPIO outputs LOW (0)
-config :boxfan, :relay_pins,
-  relay1: 26,  # Fan speed 1 (CH1, Pin 37)
-  relay2: 20,  # Fan speed 2 (CH2, Pin 38)
-  relay3: 21   # Fan speed 3 (CH3, Pin 40)
+# Active HIGH logic - relays activate when GPIO outputs HIGH (1)
+config :boxfan, Boxfan.FanController,
+  relay_pins: %{
+    1 => 26,  # Fan speed 1 (CH1, Pin 37)
+    2 => 20,  # Fan speed 2 (CH2, Pin 38)
+    3 => 21   # Fan speed 3 (CH3, Pin 40)
+  }
 ```
 
 ### I2C Configuration
 ```elixir
-config :boxfan, Boxfan.BME680Sensor,
+config :boxfan, Boxfan.AirSensor,
   bus: "i2c-1",
   address: 0x77,  # Adafruit BME680 default address (0x76 if SDO→GND jumper)
   sample_interval: :timer.seconds(60),  # Sample every 60 seconds
@@ -512,22 +460,13 @@ mix upload boxfan.local
 ## Safety Considerations
 
 1. **Relay Mutual Exclusion**: Always ensure only one relay is active
-2. **Active LOW Logic**: Remember relays activate on LOW (0), deactivate on HIGH (1)
-3. **GPIO Cleanup**: Properly release GPIO pins on shutdown (set all HIGH to deactivate)
+2. **Active HIGH Logic**: Relays activate on HIGH (1), deactivate on LOW (0)
+3. **GPIO Cleanup**: Properly release GPIO pins on shutdown (set all LOW to deactivate)
 4. **Hardware Setup**: Verify Relay_JMP jumper is connected for Pi control
 5. **Database Locking**: Handle SQLite concurrent access properly
 6. **Error Recovery**: Ensure relay state is safe on crash/restart (default all relays OFF)
 
-## Future Enhancements
-
-- Gas resistance-based automatic fan control (e.g., increase speed when gas resistance drops below threshold, indicating high VOC)
-- Scheduling customization via web interface
-- Multiple scheduling profiles
-- Push notifications for high VOC levels or temperature alerts
-- Export sensor data to CSV
-- Air Quality Index (AQI) calculation from BME680 readings
-
-## Dependencies to Add
+## Key Dependencies
 
 ```elixir
 # Phoenix and web
@@ -537,6 +476,8 @@ mix upload boxfan.local
 {:plug_cowboy, "~> 2.7"},
 {:jason, "~> 1.4"},
 {:heroicons, "~> 0.5"},
+{:esbuild, "~> 0.7", runtime: Mix.env() == :dev},
+{:tailwind, "~> 0.3.1", runtime: Mix.env() == :dev},
 
 # Database
 {:ecto_sql, "~> 3.11"},
@@ -545,13 +486,19 @@ mix upload boxfan.local
 # Hardware interfacing
 {:circuits_gpio, "~> 2.0"},
 {:circuits_i2c, "~> 2.0"},
+{:elixir_bme680, "~> 0.2.2"},
 
 # Test dependencies
+{:mox, "~> 1.0", only: :test},
 {:mishras, "~> 0.1", only: :test},
 {:faker, "~> 0.18", only: :test},
 
-# Tailscale (may already be in nerves_pack)
-# Check nerves_pack documentation
+# Dev dependencies
+{:tidewave, "~> 0.1", only: :dev},
+
+# Nerves
+{:nerves, "~> 1.10", runtime: false},
+{:nerves_pack, "~> 0.7.1", targets: @all_targets},
 ```
 
 ## Architectural Guidelines
@@ -562,31 +509,45 @@ This project follows domain-driven design principles adapted from the techo proj
 
 ```
 lib/
-├── boxfan/                       # Application context (business logic)
+├── boxfan/                        # Application context (business logic)
 │   ├── application.ex             # OTP application supervisor tree
 │   ├── fan_controller.ex          # Fan control GenServer (relay logic)
-│   ├── bme680_sensor.ex           # BME680 sensor GenServer (I2C sampling)
-│   └── scheduler.ex               # Scheduling GenServer (periodic ventilation)
+│   ├── air_sensor.ex              # BME680 sensor GenServer (sampling)
+│   ├── scheduler.ex               # Scheduling GenServer (periodic ventilation)
+│   ├── tailscale.ex               # Tailscale VPN connection management
+│   ├── release.ex                 # Database migration runner for releases
+│   ├── gpio_behaviour.ex          # GPIO interface specification
+│   └── bme680_behaviour.ex        # BME680 interface specification
 ├── data/                          # Data layer (schemas and repo)
-│   ├── repo.ex                    # Ecto repository
+│   ├── repo.ex                    # Ecto repository (SQLite)
 │   ├── event.ex                   # Event schema
 │   └── sensor_reading.ex          # SensorReading schema
 ├── web/                           # Web layer (Phoenix components)
 │   ├── endpoint.ex                # Phoenix endpoint configuration
 │   ├── router.ex                  # Application routing
 │   ├── layouts.ex                 # Layout components
-│   ├── dashboard/
-│   │   ├── live.ex                # Main dashboard LiveView
-│   │   └── live_test.exs
+│   ├── error_html.ex              # Error page templates
+│   ├── dashboard_live.ex          # Main dashboard LiveView
 │   └── components/
-│       └── core.ex                # Reusable UI components
+│       └── sensor_chart.ex        # SVG chart LiveComponent
 └── boxfan.ex                      # Main module
+
+host/                              # Host mode implementations (development)
+├── gpio.ex                        # Mock GPIO using application env
+└── bme680.ex                      # Simulated sensor readings
+
+support/                           # Test support code (compiled only in :test)
+├── mocks.ex                       # Mox mock definitions
+├── data_case.ex                   # DataCase for database tests
+└── mishras/                       # Factory implementations
+    ├── event.ex                   # Event factory
+    └── sensor_reading.ex          # SensorReading factory
 ```
 
 ### Key Architectural Principles
 
 #### 1. Domain-Driven Design
-- **Contexts** group related functionality (`Boxfan.FanController`, `Boxfan.BME680Sensor`, `Boxfan.Scheduler`)
+- **Contexts** group related functionality (`Boxfan.FanController`, `Boxfan.AirSensor`, `Boxfan.Scheduler`)
 - **Schemas** define data structures (`Data.Event`, `Data.SensorReading`)
 - **Business logic** stays in context modules (GenServers), not LiveViews
 - **LiveViews** handle only presentation and user interaction
@@ -598,12 +559,21 @@ lib/
 
 #### 3. GenServer-Based Controllers
 - `Boxfan.FanController` manages relay state and mutual exclusion
-- `Boxfan.BME680Sensor` polls I2C sensor every 60s, stores readings, purges old data
+- `Boxfan.AirSensor` polls BME680 sensor every 60s, stores readings, purges old data
 - `Boxfan.Scheduler` handles periodic ventilation using Process.send_after
+- `Boxfan.Tailscale` manages VPN connection via MuonTrap daemon
 - State management centralized in GenServers
 - LiveView subscribes to GenServer updates via PubSub
 
-#### 4. Data Layer Separation
+#### 4. Supporting Modules
+- `Boxfan.Release` - Runs Ecto migrations on boot for Nerves devices
+- `Web.Components.SensorChart` - SVG LiveComponent for historical data visualization
+  - Supports multiple metrics (temperature, humidity, pressure, gas resistance)
+  - Time range selection (hour, day, week, month)
+  - Fan cycle visualization as amber gradients
+  - Responsive SVG with proper axis scaling
+
+#### 5. Data Layer Separation
 - All database interactions through `Data.Repo`
 - Schemas in `data/` directory
 - Contexts use Ecto changesets for validation
@@ -622,83 +592,11 @@ Scheduler → FanController → GPIO + Event Logging
 
 ### Schemas
 
-```elixir
-# lib/data/event.ex
-defmodule Data.Event do
-  use Ecto.Schema
-  import Ecto.Changeset
+All schemas follow conventions defined in the `database-guidelines` skill. See `lib/data/event.ex` and `lib/data/sensor_reading.ex` for implementations.
 
-  schema "events" do
-    field :relay_number, :integer  # 1, 2, or 3
-    field :action, :string         # "on" or "off"
-    field :source, :string         # "manual" or "automatic"
+### GenServer Pattern
 
-    timestamps(type: :utc_datetime)
-  end
-
-  def changeset(event, attrs) do
-    event
-    |> cast(attrs, [:relay_number, :action, :source])
-    |> validate_required([:relay_number, :action, :source])
-    |> validate_inclusion(:relay_number, [1, 2, 3])
-    |> validate_inclusion(:action, ["on", "off"])
-    |> validate_inclusion(:source, ["manual", "automatic"])
-  end
-end
-
-# lib/data/sensor_reading.ex
-defmodule Data.SensorReading do
-  use Ecto.Schema
-  import Ecto.Changeset
-
-  schema "sensor_readings" do
-    field :temperature, :float      # Celsius
-    field :humidity, :float         # Percentage
-    field :pressure, :float         # hPa
-    field :gas_resistance, :float   # Ohms
-
-    timestamps(type: :utc_datetime)
-  end
-
-  def changeset(reading, attrs) do
-    reading
-    |> cast(attrs, [:temperature, :humidity, :pressure, :gas_resistance])
-    |> validate_required([:temperature, :humidity, :pressure, :gas_resistance])
-  end
-end
-```
-
-### FanController GenServer Pattern
-
-```elixir
-defmodule Boxfan.FanController do
-  use GenServer
-  require Logger
-
-  # Client API
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  def set_speed(speed), do: GenServer.call(__MODULE__, {:set_speed, speed})
-  def get_state(), do: GenServer.call(__MODULE__, :get_state)
-
-  # Server Callbacks
-  def init(opts) do
-    state = %{
-      current_relay: nil,
-      pins: Keyword.fetch!(opts, :relay_pins)
-    }
-    {:ok, state}
-  end
-
-  def handle_call({:set_speed, speed}, _from, state) do
-    # Mutual exclusion logic
-    # Turn off current relay if any
-    # Turn on new relay if speed > 0
-    # Log event to database
-    # Broadcast state change via PubSub
-    {:reply, :ok, new_state}
-  end
-end
-```
+All GenServers follow the Router Pattern defined in the `genserver-router-pattern` skill. See `lib/boxfan/fan_controller.ex` for a reference implementation.
 
 ### LiveView Patterns
 
@@ -736,205 +634,65 @@ end
 
 ### Hardware Mocking Strategy
 
-To test hardware-dependent code without physical devices, we use a behavior-based mocking approach:
+Hardware-dependent code uses a behavior-based abstraction with three implementation tiers:
 
-#### GPIO Mocking (Relay Control)
+1. **Behaviors** define the interface (`lib/boxfan/gpio_behaviour.ex`, `lib/boxfan/bme680_behaviour.ex`)
+2. **Host implementations** provide dev-mode simulation (`host/gpio.ex`, `host/bme680.ex`)
+3. **Mox mocks** enable precise test assertions (`support/mocks.ex`)
 
-**Behavior Definition:**
+#### Behaviors
+
 ```elixir
+# lib/boxfan/gpio_behaviour.ex
 defmodule Boxfan.GPIOBehaviour do
   @callback open(pin :: non_neg_integer(), direction :: :input | :output) ::
-    {:ok, reference()} | {:error, term()}
+              {:ok, reference()} | {:error, term()}
   @callback write(ref :: reference(), value :: 0 | 1) :: :ok | {:error, term()}
   @callback close(ref :: reference()) :: :ok
 end
-```
 
-**Mock Implementation** (`support/mocks/gpio_mock.ex`):
-```elixir
-defmodule Boxfan.GPIOMock do
-  @behaviour Boxfan.GPIOBehaviour
-
-  # Use Agent to track state for assertions in tests
-  def start_link do
-    Agent.start_link(fn -> %{pins: %{}, writes: []} end, name: __MODULE__)
-  end
-
-  def open(pin, direction) do
-    ref = make_ref()
-    Agent.update(__MODULE__, fn state ->
-      put_in(state, [:pins, ref], %{pin: pin, direction: direction, value: nil})
-    end)
-    {:ok, ref}
-  end
-
-  def write(ref, value) do
-    Agent.update(__MODULE__, fn state ->
-      state
-      |> put_in([:pins, ref, :value], value)
-      |> update_in([:writes], &[{ref, value, DateTime.utc_now()} | &1])
-    end)
-    :ok
-  end
-
-  def close(ref) do
-    Agent.update(__MODULE__, fn state ->
-      update_in(state, [:pins], &Map.delete(&1, ref))
-    end)
-    :ok
-  end
-
-  # Test helpers
-  def get_pin_value(ref) do
-    Agent.get(__MODULE__, fn state ->
-      get_in(state, [:pins, ref, :value])
-    end)
-  end
-
-  def get_write_history do
-    Agent.get(__MODULE__, fn state -> Enum.reverse(state.writes) end)
-  end
-
-  def reset do
-    Agent.update(__MODULE__, fn _state -> %{pins: %{}, writes: []} end)
-  end
-end
-```
-
-**Real Implementation Wrapper** (`lib/boxfan/gpio_adapter.ex`):
-```elixir
-defmodule Boxfan.GPIOAdapter do
-  @behaviour Boxfan.GPIOBehaviour
-
-  def open(pin, direction), do: Circuits.GPIO.open(pin, direction)
-  def write(ref, value), do: Circuits.GPIO.write(ref, value)
-  def close(ref), do: Circuits.GPIO.close(ref)
-end
-```
-
-#### I2C Mocking (BME680 Sensor)
-
-**Behavior Definition:**
-```elixir
-defmodule Boxfan.I2CBehaviour do
-  @callback open(bus_name :: String.t()) :: {:ok, reference()} | {:error, term()}
-  @callback write_read(ref :: reference(), address :: non_neg_integer(),
-                       write_data :: binary(), bytes_to_read :: non_neg_integer()) ::
-    {:ok, binary()} | {:error, term()}
-  @callback close(ref :: reference()) :: :ok
-end
-```
-
-**Mock Implementation** (`support/mocks/i2c_mock.ex`):
-```elixir
-defmodule Boxfan.I2CMock do
-  @behaviour Boxfan.I2CBehaviour
-
-  def start_link do
-    # Default mock sensor readings
-    default_readings = %{
-      temperature: 22.5,
-      humidity: 45.0,
-      pressure: 1013.25,
-      gas_resistance: 50_000.0
-    }
-    Agent.start_link(fn -> %{readings: default_readings, read_count: 0} end,
-                     name: __MODULE__)
-  end
-
-  def open(_bus_name) do
-    {:ok, make_ref()}
-  end
-
-  def write_read(_ref, _address, _write_data, _bytes_to_read) do
-    # Simulate BME680 sensor response
-    Agent.get_and_update(__MODULE__, fn state ->
-      readings = state.readings
-
-      # Encode mock data (simplified - real BME680 has complex register layout)
-      data = encode_bme680_data(readings)
-
-      new_state = update_in(state, [:read_count], &(&1 + 1))
-      {{:ok, data}, new_state}
-    end)
-  end
-
-  def close(_ref), do: :ok
-
-  # Test helpers
-  def set_readings(readings) do
-    Agent.update(__MODULE__, fn state ->
-      put_in(state, [:readings], Map.merge(state.readings, readings))
-    end)
-  end
-
-  def get_read_count do
-    Agent.get(__MODULE__, fn state -> state.read_count end)
-  end
-
-  def reset do
-    default_readings = %{
-      temperature: 22.5,
-      humidity: 45.0,
-      pressure: 1013.25,
-      gas_resistance: 50_000.0
-    }
-    Agent.update(__MODULE__, fn _state ->
-      %{readings: default_readings, read_count: 0}
-    end)
-  end
-
-  defp encode_bme680_data(readings) do
-    # Simplified encoding - real BME680 has complex calibration
-    <<
-      trunc(readings.temperature * 100)::16,
-      trunc(readings.humidity * 100)::16,
-      trunc(readings.pressure * 100)::32,
-      trunc(readings.gas_resistance)::32
-    >>
-  end
-end
-```
-
-**Real Implementation Wrapper** (`lib/boxfan/i2c_adapter.ex`):
-```elixir
-defmodule Boxfan.I2CAdapter do
-  @behaviour Boxfan.I2CBehaviour
-
-  def open(bus_name), do: Circuits.I2C.open(bus_name)
-  def write_read(ref, address, write_data, bytes_to_read),
-    do: Circuits.I2C.write_read(ref, address, write_data, bytes_to_read)
-  def close(ref), do: Circuits.I2C.close(ref)
+# lib/boxfan/bme680_behaviour.ex
+defmodule Boxfan.Bme680Behaviour do
+  @callback measure(name :: atom()) :: Bme680.Measurement.t()
 end
 ```
 
 #### Configuration-Based Module Selection
 
-**In config/test.exs:**
 ```elixir
-config :boxfan, :gpio_module, Boxfan.GPIOMock
-config :boxfan, :i2c_module, Boxfan.I2CMock
+# config/test.exs - Mox mocks for precise assertions
+config :boxfan, :gpio, Boxfan.GPIOMock
+config :boxfan, :bme680, Boxfan.Bme680Mock
+
+# config/host.exs - Simulated hardware for development
+config :boxfan, :gpio, Host.GPIO
+config :boxfan, :bme680, Host.Bme680
+
+# config/target.exs - Real hardware on Nerves device
+config :boxfan, :gpio, Circuits.GPIO
+config :boxfan, :bme680, Bme680
 ```
 
-**In config/target.exs:**
+#### Mox Mock Definitions
+
 ```elixir
-config :boxfan, :gpio_module, Boxfan.GPIOAdapter
-config :boxfan, :i2c_module, Boxfan.I2CAdapter
+# support/mocks.ex
+Mox.defmock(Boxfan.GPIOMock, for: Boxfan.GPIOBehaviour)
+Mox.defmock(Boxfan.Bme680Mock, for: Boxfan.Bme680Behaviour)
 ```
 
-**In production code:**
+#### Usage in GenServers
+
 ```elixir
 defmodule Boxfan.FanController do
-  @gpio_module Application.compile_env(:boxfan, :gpio_module)
+  @gpio Application.compile_env!(:boxfan, :gpio)
 
   def init(opts) do
-    pins = Keyword.fetch!(opts, :relay_pins)
+    relay_pins = Keyword.fetch!(opts, :relay_pins)
 
-    # Open GPIO pins using configured module
-    refs = Enum.map(pins, fn {relay, pin} ->
-      {:ok, ref} = @gpio_module.open(pin, :output)
-      # Set HIGH initially (relays off - Active LOW)
-      @gpio_module.write(ref, 1)
+    refs = Enum.map(relay_pins, fn {relay, pin} ->
+      {:ok, ref} = @gpio.open(pin, :output)
+      @gpio.write(ref, 0)  # LOW = OFF (Active HIGH)
       {relay, {pin, ref}}
     end)
 
@@ -943,55 +701,25 @@ defmodule Boxfan.FanController do
 end
 ```
 
-#### Test Usage Examples
+#### Test Example with Mox
 
-**Testing FanController with GPIO mock:**
 ```elixir
 defmodule Boxfan.FanControllerTest do
   use ExUnit.Case, async: false
+  import Mox
 
-  alias Boxfan.FanController
-  alias Boxfan.GPIOMock
+  setup :verify_on_exit!
 
-  setup do
-    start_supervised!(GPIOMock)
-    GPIOMock.reset()
-    :ok
-  end
+  test "sets relay 1 on by writing HIGH" do
+    ref = make_ref()
 
-  test "sets relay 1 on by writing LOW to GPIO 26" do
-    {:ok, pid} = FanController.start_link(relay_pins: %{1 => 26, 2 => 20, 3 => 21})
+    Boxfan.GPIOMock
+    |> expect(:open, 3, fn _pin, :output -> {:ok, ref} end)
+    |> expect(:write, 3, fn ^ref, 0 -> :ok end)  # Initial OFF state
+    |> expect(:write, fn ^ref, 1 -> :ok end)     # Turn ON relay 1
 
-    FanController.set_speed(1)
-
-    # Check that GPIO mock received LOW (0) for pin 26
-    history = GPIOMock.get_write_history()
-    assert {_ref, 0, _timestamp} = List.last(history)
-  end
-end
-```
-
-**Testing BME680Sensor with I2C mock:**
-```elixir
-defmodule Boxfan.BME680SensorTest do
-  use ExUnit.Case, async: false
-
-  alias Boxfan.BME680Sensor
-  alias Boxfan.I2CMock
-
-  setup do
-    start_supervised!(I2CMock)
-    I2CMock.reset()
-    :ok
-  end
-
-  test "reads temperature from sensor" do
-    I2CMock.set_readings(%{temperature: 25.5})
-
-    reading = BME680Sensor.read_sensor()
-
-    assert reading.temperature == 25.5
-    assert I2CMock.get_read_count() > 0
+    {:ok, _pid} = Boxfan.FanController.start_link(relay_pins: %{1 => 26, 2 => 20, 3 => 21})
+    Boxfan.FanController.set_relay(1)
   end
 end
 ```
@@ -1037,12 +765,12 @@ end
 # config/target.exs
 config :boxfan, Boxfan.FanController,
   relay_pins: %{
-    1 => 26,  # GPIO pin for relay 1 (CH1, Pin 37) - Active LOW
-    2 => 20,  # GPIO pin for relay 2 (CH2, Pin 38) - Active LOW
-    3 => 21   # GPIO pin for relay 3 (CH3, Pin 40) - Active LOW
+    1 => 26,  # GPIO pin for relay 1 (CH1, Pin 37) - Active HIGH
+    2 => 20,  # GPIO pin for relay 2 (CH2, Pin 38) - Active HIGH
+    3 => 21   # GPIO pin for relay 3 (CH3, Pin 40) - Active HIGH
   }
 
-config :boxfan, Boxfan.BME680Sensor,
+config :boxfan, Boxfan.AirSensor,
   bus: "i2c-1",
   address: 0x77,
   sample_interval: :timer.seconds(60),
