@@ -1,0 +1,139 @@
+# Boxfan Sensor Data Export
+
+Export and analyze sensor readings from the boxfan device via Erlang distribution.
+
+## Setup
+
+Start Livebook with distribution enabled:
+
+```
+livebook server --name livebook@$(hostname).local --cookie boxfan_cookie
+```
+
+```elixir
+Mix.install([
+  {:explorer, "~> 0.8"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"}
+])
+
+alias Explorer.DataFrame, as: DF
+alias Explorer.Series
+
+target_node = :"boxfan@boxfan.local"
+```
+
+## Connect to Device
+
+```elixir
+case Node.connect(target_node) do
+  true ->
+    IO.puts("Connected to #{target_node}")
+    :ok
+
+  false ->
+    IO.puts("""
+    Failed to connect. Make sure:
+      1. boxfan has distribution enabled (requires firmware rebuild)
+      2. Livebook was started with --cookie boxfan_cookie
+      3. Both machines are on the same network
+    """)
+
+    :error
+end
+```
+
+## Fetch Readings into DataFrame
+
+```elixir
+readings =
+  :rpc.call(target_node, Data.Repo, :all, [Data.SensorReading])
+  |> Enum.sort_by(& &1.inserted_at, DateTime)
+
+df =
+  DF.new(
+    id: Enum.map(readings, & &1.id),
+    temperature: Enum.map(readings, & &1.temperature),
+    humidity: Enum.map(readings, & &1.humidity),
+    pressure: Enum.map(readings, & &1.pressure),
+    gas_resistance: Enum.map(readings, & &1.gas_resistance),
+    inserted_at: Enum.map(readings, & &1.inserted_at)
+  )
+
+IO.puts("Loaded #{DF.n_rows(df)} readings")
+df
+```
+
+## Summary Statistics
+
+```elixir
+DF.describe(df)
+```
+
+## Temperature Chart
+
+```elixir
+VegaLite.new(width: 700, height: 300, title: "Temperature Over Time")
+|> VegaLite.data_from_values(df, only: ["inserted_at", "temperature"])
+|> VegaLite.mark(:line)
+|> VegaLite.encode_field(:x, "inserted_at", type: :temporal, title: "Time")
+|> VegaLite.encode_field(:y, "temperature", type: :quantitative, title: "Temperature (°C)")
+```
+
+## Humidity Chart
+
+```elixir
+VegaLite.new(width: 700, height: 300, title: "Humidity Over Time")
+|> VegaLite.data_from_values(df, only: ["inserted_at", "humidity"])
+|> VegaLite.mark(:line, color: "green")
+|> VegaLite.encode_field(:x, "inserted_at", type: :temporal, title: "Time")
+|> VegaLite.encode_field(:y, "humidity", type: :quantitative, title: "Humidity (%)")
+```
+
+## Gas Resistance Chart
+
+```elixir
+VegaLite.new(width: 700, height: 300, title: "Gas Resistance Over Time")
+|> VegaLite.data_from_values(df, only: ["inserted_at", "gas_resistance"])
+|> VegaLite.mark(:line, color: "orange")
+|> VegaLite.encode_field(:x, "inserted_at", type: :temporal, title: "Time")
+|> VegaLite.encode_field(:y, "gas_resistance", type: :quantitative, title: "Gas Resistance (Ω)")
+```
+
+## Export to CSV
+
+```elixir
+timestamp = DateTime.utc_now() |> DateTime.to_iso8601(:basic) |> String.slice(0, 15)
+filename = "readings_#{timestamp}.csv"
+
+DF.to_csv!(df, filename)
+IO.puts("Exported to #{filename}")
+```
+
+## Live Controls
+
+### Current Reading
+
+```elixir
+:rpc.call(target_node, Boxfan.AirSensor, :read_current, [])
+```
+
+### Fan State
+
+```elixir
+:rpc.call(target_node, Boxfan.FanController, :get_state, [])
+```
+
+### Set Fan Speed
+
+```elixir
+# 0 = off, 1-3 = speed
+speed = Kino.Input.select("Fan Speed", [{"Off", 0}, {"Speed 1", 1}, {"Speed 2", 2}, {"Speed 3", 3}])
+```
+
+```elixir
+selected_speed = Kino.Input.read(speed)
+# Uncomment to actually set:
+# :rpc.call(target_node, Boxfan.FanController, :set_relay, [selected_speed])
+IO.puts("Would set fan to speed #{selected_speed}")
+```
