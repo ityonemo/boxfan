@@ -55,6 +55,15 @@ config :boxfan, Web.Endpoint,
 
 config :shoehorn, init: [:nerves_runtime, :nerves_pack]
 
+# Enable Erlang distribution for remote IEx access
+# Connect with: iex --name dev@<hostname>.local --cookie boxfan_cookie
+# Then: Node.connect(:'boxfan@boxfan.local')
+config :nerves_pack,
+  distribution: [
+    node_name: "boxfan",
+    node_host: :mdns_domain
+  ]
+
 # Configure Tailscale for secure remote access
 # Capture auth key at compile time to bake it into the firmware
 config :boxfan,
