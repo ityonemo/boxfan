@@ -11,6 +11,10 @@ defmodule Web.DashboardLive do
   alias Data.Event
   alias Data.SensorReading
 
+  # IAQ calculation parameters (calibrated from sensor data)
+  @ph_slope Application.compile_env(:boxfan, Boxfan.AirSensor)[:ph_slope] || 0.04
+  @gas_ceil Application.compile_env(:boxfan, Boxfan.AirSensor)[:gas_ceil] || 100_000
+
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Boxfan.PubSub, "fan_controller")
@@ -131,6 +135,7 @@ defmodule Web.DashboardLive do
             <p><strong>Humidity:</strong> <%= Float.round(@current_reading.humidity, 1) %>%</p>
             <p><strong>Pressure:</strong> <%= Float.round(@current_reading.pressure, 1) %> kPa</p>
             <p><strong>Gas Resistance:</strong> <%= trunc(@current_reading.gas_resistance) %> Ω</p>
+            <p><strong>Air Quality:</strong> <%= trunc(calculate_aqi(@current_reading)) %>%</p>
           <% end %>
         </div>
 
@@ -154,10 +159,10 @@ defmodule Web.DashboardLive do
               </button>
               <button
                 phx-click="change_chart_metric"
-                phx-value-metric="gas_resistance"
-                style={"padding: 8px 16px; border: 2px solid #007bff; border-radius: 4px; #{if @chart_metric == :gas_resistance, do: "background-color: #007bff; color: white; font-weight: bold;", else: "background-color: white; color: #007bff;"}"}
+                phx-value-metric="aqi"
+                style={"padding: 8px 16px; border: 2px solid #007bff; border-radius: 4px; #{if @chart_metric == :aqi, do: "background-color: #007bff; color: white; font-weight: bold;", else: "background-color: white; color: #007bff;"}"}
               >
-                Gas
+                AQI
               </button>
             </div>
 
@@ -274,6 +279,24 @@ defmodule Web.DashboardLive do
 
   defp format_datetime(datetime) do
     Calendar.strftime(datetime, "%Y-%m-%d %H:%M:%S")
+  end
+
+  defp calculate_aqi(reading) do
+    temp = reading.temperature
+    humidity = reading.humidity
+    gas_resistance = reading.gas_resistance
+
+    # Step 1: Calculate absolute humidity (g/m³)
+    rho_max = (6.112 * 100 * :math.exp((17.62 * temp) / (243.12 + temp))) /
+              (461.52 * (temp + 273.15))
+    abs_humidity = humidity * 10 * rho_max
+
+    # Step 2: Compensate gas resistance for humidity
+    comp_gas = gas_resistance * :math.exp(@ph_slope * abs_humidity)
+
+    # Step 3: Calculate AQI (0-100%)
+    ratio = comp_gas / @gas_ceil
+    min(ratio * ratio, 1.0) * 100
   end
 
   defp format_time_until(next_cycle_time) do

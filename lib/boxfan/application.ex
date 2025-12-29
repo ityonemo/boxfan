@@ -16,6 +16,11 @@ defmodule Boxfan.Application do
       Boxfan.Release.migrate()
     end
 
+    # Start Erlang distribution on target devices for remote IEx access
+    # Connect with: iex --name dev@<hostname>.local --cookie boxfan_cookie
+    # Then: Node.connect(:'boxfan@boxfan.local')
+    start_distribution()
+
     children =
       [
         # Children for all targets
@@ -111,5 +116,29 @@ defmodule Boxfan.Application do
   defp tailscale_config do
     # Use compile-time captured auth key
     [auth_key: @tailscale_auth_key]
+  end
+
+  # Start Erlang distribution on target devices
+  # See: https://dev.to/mnishiguchi/connect-nerves-devices-forming-an-erlang-cluster-185d
+  defp start_distribution do
+    case {@target, Application.get_env(:boxfan, :env)} do
+      {:host, _} ->
+        # Don't start distribution in host mode
+        :ok
+
+      {_, :test} ->
+        # Don't start distribution in test mode
+        :ok
+
+      _ ->
+        # Start epmd daemon first (required for distribution)
+        System.cmd("epmd", ["-daemon"])
+
+        # Start distribution with longnames (required for .local mDNS names)
+        Node.start(:"boxfan@boxfan.local", :longnames)
+
+        # Set the cookie for authentication
+        Node.set_cookie(:boxfan_cookie)
+    end
   end
 end

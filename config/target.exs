@@ -31,7 +31,9 @@ config :boxfan, Boxfan.AirSensor,
   bus: "i2c-1",
   address: 0x77,
   sample_interval: :timer.seconds(60),
-  data_retention_days: 30
+  data_retention_days: 30,
+  ph_slope: 0.0847306932433938,
+  gas_ceil: 2066586.8541392616
 
 # Configure Scheduler
 config :boxfan, Boxfan.Scheduler,
@@ -55,14 +57,9 @@ config :boxfan, Web.Endpoint,
 
 config :shoehorn, init: [:nerves_runtime, :nerves_pack]
 
-# Enable Erlang distribution for remote IEx access
+# Note: Erlang distribution is started at runtime in Boxfan.Application
 # Connect with: iex --name dev@<hostname>.local --cookie boxfan_cookie
 # Then: Node.connect(:'boxfan@boxfan.local')
-config :nerves_pack,
-  distribution: [
-    node_name: "boxfan",
-    node_host: :mdns_domain
-  ]
 
 # Configure Tailscale for secure remote access
 # Capture auth key at compile time to bake it into the firmware

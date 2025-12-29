@@ -1,5 +1,7 @@
 # Boxfan Sensor Data Export
 
+## Section
+
 Export and analyze sensor readings from the boxfan device via Erlang distribution.
 
 ## Setup
@@ -98,6 +100,181 @@ VegaLite.new(width: 700, height: 300, title: "Gas Resistance Over Time")
 |> VegaLite.mark(:line, color: "orange")
 |> VegaLite.encode_field(:x, "inserted_at", type: :temporal, title: "Time")
 |> VegaLite.encode_field(:y, "gas_resistance", type: :quantitative, title: "Gas Resistance (Ω)")
+```
+
+## Gas Resistance Vs Temperature
+
+```elixir
+VegaLite.new(width: 700, height: 400, title: "Gas Resistance vs Temperature")
+|> VegaLite.data_from_values(df, only: ["temperature", "gas_resistance"])
+|> VegaLite.mark(:point, opacity: 0.6)
+|> VegaLite.encode_field(:x, "temperature", type: :quantitative, title: "Temperature (°C)")
+|> VegaLite.encode_field(:y, "gas_resistance", type: :quantitative, title: "Gas Resistance (Ω)")
+```
+
+## Air Quality Index (Estimated)
+
+Derive IAQ by compensating for humidity effects and estimating baseline from data.
+
+### Step 1: Calculate Absolute Humidity
+
+```elixir
+# Calculate absolute humidity from temperature and relative humidity
+# Uses Magnus equation for saturation vapor pressure + ideal gas law
+calc_absolute_humidity = fn temp, rh ->
+  # rho_max = max water vapor density at temperature (g/m³)
+  rho_max = (6.112 * 100 * :math.exp((17.62 * temp) / (243.12 + temp))) /
+            (461.52 * (temp + 273.15))
+  rh * 10 * rho_max
+end
+
+# Compute absolute humidity by zipping temp and humidity lists
+abs_humidity_values =
+  Enum.zip(Series.to_list(df["temperature"]), Series.to_list(df["humidity"]))
+  |> Enum.map(fn {t, h} -> calc_absolute_humidity.(t, h) end)
+log_gas_values =
+  df["gas_resistance"]
+  |> Series.to_list()
+  |> Enum.map(&:math.log/1)
+
+df =
+  df
+  |> DF.put(:abs_humidity, Series.from_list(abs_humidity_values))
+  |> DF.put(:log_gas, Series.from_list(log_gas_values))
+df
+```
+
+### Step 2: Estimate Humidity Compensation Slope
+
+```elixir
+# Linear regression: log(gas_resistance) = intercept + ph_slope * abs_humidity
+# We want ph_slope to compensate: comp_gas = gas * exp(ph_slope * abs_humidity)
+
+abs_hum = Series.to_list(df["abs_humidity"])
+log_gas = Series.to_list(df["log_gas"])
+n = length(abs_hum)
+
+# Simple linear regression
+mean_x = Enum.sum(abs_hum) / n
+mean_y = Enum.sum(log_gas) / n
+
+numerator = Enum.zip(abs_hum, log_gas)
+  |> Enum.map(fn {x, y} -> (x - mean_x) * (y - mean_y) end)
+  |> Enum.sum()
+
+denominator = abs_hum
+  |> Enum.map(fn x -> (x - mean_x) * (x - mean_x) end)
+  |> Enum.sum()
+
+# Note: we want to COMPENSATE, so we use the negative of the observed slope
+ph_slope = -(numerator / denominator)
+
+IO.puts("Estimated ph_slope: #{Float.round(ph_slope, 4)}")
+IO.puts("(Typical values range from 0.03 to 0.05)")
+
+ph_slope
+```
+
+### Step 3: Compute Compensated Gas Resistance
+
+```elixir
+comp_gas_values =
+  Enum.zip(Series.to_list(df["gas_resistance"]), Series.to_list(df["abs_humidity"]))
+  |> Enum.map(fn {gas, hum_abs} -> gas * :math.exp(ph_slope * hum_abs) end)
+
+df = DF.put(df, :comp_gas, Series.from_list(comp_gas_values))
+
+# Estimate baseline as 95th percentile of compensated resistance
+# (assumes ~5% of time you have near-clean air)
+gas_ceil = Series.quantile(df["comp_gas"], 0.9999)
+
+IO.puts("Estimated gas_ceil (95th percentile): #{Float.round(gas_ceil, 0)} Ω")
+
+gas_ceil
+```
+
+### Step 4: Calculate Air Quality Index
+
+```elixir
+iaq_values =
+  df["comp_gas"]
+  |> Series.to_list()
+  |> Enum.map(fn cg -> min((cg / gas_ceil) ** 2, 1.0) * 100 end)
+
+df = DF.put(df, :iaq, Series.from_list(iaq_values))
+
+# Show statistics
+IO.puts("\nIAQ Statistics:")
+IO.puts("  Min: #{Float.round(Series.min(df["iaq"]), 1)}%")
+IO.puts("  Max: #{Float.round(Series.max(df["iaq"]), 1)}%")
+IO.puts("  Mean: #{Float.round(Series.mean(df["iaq"]), 1)}%")
+IO.puts("  Median: #{Float.round(Series.median(df["iaq"]), 1)}%")
+
+df
+```
+
+### IAQ Over Time
+
+```elixir
+VegaLite.new(width: 700, height: 300, title: "Estimated Air Quality Index Over Time")
+|> VegaLite.data_from_values(df, only: ["inserted_at", "iaq"])
+|> VegaLite.mark(:line, color: "purple")
+|> VegaLite.encode_field(:x, "inserted_at", type: :temporal, title: "Time")
+|> VegaLite.encode_field(:y, "iaq",
+     type: :quantitative,
+     title: "Air Quality (%)",
+     scale: [domain: [0, 100]])
+```
+
+### Compensation Effectiveness
+
+Compare raw gas resistance vs humidity-compensated:
+
+```elixir
+VegaLite.new(width: 700, height: 300, title: "Raw vs Compensated Gas Resistance")
+|> VegaLite.data_from_values(df, only: ["abs_humidity", "gas_resistance", "comp_gas"])
+|> VegaLite.concat([
+  VegaLite.new(title: "Raw (humidity-dependent)")
+  |> VegaLite.mark(:point, opacity: 0.4, color: "orange")
+  |> VegaLite.encode_field(:x, "abs_humidity", type: :quantitative, title: "Absolute Humidity (g/m³)")
+  |> VegaLite.encode_field(:y, "gas_resistance", type: :quantitative, title: "Resistance (Ω)"),
+
+  VegaLite.new(title: "Compensated (humidity-independent)")
+  |> VegaLite.mark(:point, opacity: 0.4, color: "green")
+  |> VegaLite.encode_field(:x, "abs_humidity", type: :quantitative, title: "Absolute Humidity (g/m³)")
+  |> VegaLite.encode_field(:y, "comp_gas", type: :quantitative, title: "Resistance (Ω)")
+], :horizontal)
+```
+
+### Calibrated Parameters
+
+These are the two key parameters derived from your data. Copy these to your application config:
+
+```elixir
+IO.puts("""
+# Add to config/target.exs or use in Boxfan.AirSensor:
+
+config :boxfan, Boxfan.AirSensor,
+  # ... existing config ...
+  ph_slope: #{Float.round(ph_slope, 6)},
+  gas_ceil: #{Float.round(gas_ceil, 2)}
+
+# Or as module attributes:
+@ph_slope #{Float.round(ph_slope, 6)}
+@gas_ceil #{Float.round(gas_ceil, 2)}
+
+# IAQ formula:
+# abs_humidity = calc_absolute_humidity(temp, humidity)
+# comp_gas = gas_resistance * :math.exp(@ph_slope * abs_humidity)
+# iaq = min((comp_gas / @gas_ceil) ** 2, 1.0) * 100
+""")
+
+%{
+  ph_slope: ph_slope,
+  gas_ceil: gas_ceil,
+  data_points: DF.n_rows(df),
+  date_range: {Series.min(df["inserted_at"]), Series.max(df["inserted_at"])}
+}
 ```
 
 ## Export to CSV

@@ -13,6 +13,10 @@ defmodule Web.Components.SensorChart do
   @margin_top 25
   @margin_right 25
 
+  # IAQ calculation parameters (calibrated from sensor data)
+  @ph_slope Application.compile_env(:boxfan, Boxfan.AirSensor)[:ph_slope] || 0.04
+  @gas_ceil Application.compile_env(:boxfan, Boxfan.AirSensor)[:gas_ceil] || 100_000
+
   def render(assigns) do
     assigns = prepare_chart_data(assigns)
 
@@ -136,8 +140,8 @@ defmodule Web.Components.SensorChart do
   end
 
   defp prepare_chart_data(%{data: data, metric: metric, time_range: time_range} = assigns) do
-    # Extract values for the selected metric
-    values = Enum.map(data, &Map.get(&1, metric))
+    # Extract values for the selected metric (with AQI computation if needed)
+    values = Enum.map(data, &get_metric_value(&1, metric))
 
     # Calculate min and max for scaling
     {data_min, data_max} = Enum.min_max(values)
@@ -159,7 +163,7 @@ defmodule Web.Components.SensorChart do
     points =
       data
       |> Enum.map(fn reading ->
-        val = Map.get(reading, metric)
+        val = get_metric_value(reading, metric)
         timestamp = reading.inserted_at
 
         # Calculate X position based on timestamp within the time range
@@ -238,17 +242,41 @@ defmodule Web.Components.SensorChart do
   defp metric_label_and_unit(:temperature), do: {"Temperature", "°C"}
   defp metric_label_and_unit(:humidity), do: {"Humidity", "%"}
   defp metric_label_and_unit(:pressure), do: {"Pressure", " hPa"}
-  defp metric_label_and_unit(:gas_resistance), do: {"Gas Resistance", " Ω"}
+  defp metric_label_and_unit(:aqi), do: {"Air Quality", "%"}
 
   defp time_range_label(:hour), do: "Last Hour"
   defp time_range_label(:day), do: "Last 24 Hours"
   defp time_range_label(:week), do: "Last 7 Days"
   defp time_range_label(:month), do: "Last 30 Days"
 
+  # Get metric value from reading (with AQI computation)
+  defp get_metric_value(reading, :aqi) do
+    # Compute AQI from gas_resistance, temperature, and humidity
+    temp = reading.temperature
+    humidity = reading.humidity
+    gas_resistance = reading.gas_resistance
+
+    # Step 1: Calculate absolute humidity (g/m³)
+    rho_max = (6.112 * 100 * :math.exp((17.62 * temp) / (243.12 + temp))) /
+              (461.52 * (temp + 273.15))
+    abs_humidity = humidity * 10 * rho_max
+
+    # Step 2: Compensate gas resistance for humidity
+    comp_gas = gas_resistance * :math.exp(@ph_slope * abs_humidity)
+
+    # Step 3: Calculate AQI (0-100%)
+    ratio = comp_gas / @gas_ceil
+    min(ratio * ratio, 1.0) * 100
+  end
+
+  defp get_metric_value(reading, metric) do
+    Map.get(reading, metric)
+  end
+
   # Format axis tick labels
   defp format_axis_tick(val, :temperature), do: trunc(val)
   defp format_axis_tick(val, :humidity), do: trunc(val)
-  defp format_axis_tick(val, :gas_resistance), do: trunc(val)
+  defp format_axis_tick(val, :aqi), do: trunc(val)
   defp format_axis_tick(val, :pressure), do: Float.round(val, 1)
 
   # Round axis min down to nice numbers
@@ -267,9 +295,9 @@ defmodule Web.Components.SensorChart do
     val
   end
 
-  defp round_axis_min(val, :gas_resistance) do
-    # Round down to nearest 5000 Ω
-    floor(val / 5000) * 5000
+  defp round_axis_min(_val, :aqi) do
+    # AQI always starts at 0%
+    0
   end
 
   # Round axis max up to nice numbers
@@ -288,9 +316,9 @@ defmodule Web.Components.SensorChart do
     val
   end
 
-  defp round_axis_max(val, :gas_resistance) do
-    # Round up to nearest 5000 Ω
-    ceil(val / 5000) * 5000
+  defp round_axis_max(_val, :aqi) do
+    # AQI always caps at 100%
+    100
   end
 
   defp build_time_boundary_ticks(
