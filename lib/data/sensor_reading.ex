@@ -26,7 +26,7 @@ defmodule Data.SensorReading do
 
   ## Returns
     List of sensor readings ordered by timestamp ascending.
-    For :week and :month, readings are averaged in groups of 7 and 30 respectively.
+    For :week and :month, samples every 5th and 20th reading respectively.
   """
   @spec for_time_range(:hour | :day | :week | :month) :: [%__MODULE__{}]
   def for_time_range(time_range) when time_range in [:hour, :day] do
@@ -43,22 +43,20 @@ defmodule Data.SensorReading do
     cutoff_time = calculate_cutoff_time(:week)
 
     from(sr in __MODULE__,
-      where: sr.inserted_at >= ^cutoff_time,
+      where: sr.inserted_at >= ^cutoff_time and fragment("id % 5 = 0"),
       order_by: [asc: sr.inserted_at]
     )
     |> Data.Repo.all()
-    |> aggregate_readings(7)
   end
 
   def for_time_range(:month) do
     cutoff_time = calculate_cutoff_time(:month)
 
     from(sr in __MODULE__,
-      where: sr.inserted_at >= ^cutoff_time,
+      where: sr.inserted_at >= ^cutoff_time and fragment("id % 20 = 0"),
       order_by: [asc: sr.inserted_at]
     )
     |> Data.Repo.all()
-    |> aggregate_readings(30)
   end
 
   defp calculate_cutoff_time(:hour) do
@@ -75,32 +73,5 @@ defmodule Data.SensorReading do
 
   defp calculate_cutoff_time(:month) do
     DateTime.utc_now() |> DateTime.add(-30, :day) |> DateTime.truncate(:second)
-  end
-
-  defp aggregate_readings(readings, chunk_size) do
-    readings
-    |> Enum.chunk_every(chunk_size)
-    |> Enum.map(fn chunk ->
-      # Average all metrics in the chunk
-      count = length(chunk)
-
-      avg_temperature = Enum.sum(Enum.map(chunk, & &1.temperature)) / count
-      avg_humidity = Enum.sum(Enum.map(chunk, & &1.humidity)) / count
-      avg_pressure = Enum.sum(Enum.map(chunk, & &1.pressure)) / count
-      avg_gas_resistance = Enum.sum(Enum.map(chunk, & &1.gas_resistance)) / count
-
-      # Use the first reading's timestamp as the representative timestamp
-      first_reading = hd(chunk)
-
-      %__MODULE__{
-        id: first_reading.id,
-        temperature: avg_temperature,
-        humidity: avg_humidity,
-        pressure: avg_pressure,
-        gas_resistance: avg_gas_resistance,
-        inserted_at: first_reading.inserted_at,
-        updated_at: first_reading.updated_at
-      }
-    end)
   end
 end
